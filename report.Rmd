@@ -1,0 +1,276 @@
+---
+title: "Case Study: Prediction of Daily Steps"
+author: "Daniel Kwapien"
+output:
+  html_document:
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+![](https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2F9to5mac.com%2Fwp-content%2Fuploads%2Fsites%2F6%2F2018%2F05%2Fhow-to-see-steps-apple-watch-walkthrough-1.png%3Fresize%3D1024&f=1&nofb=1&ipt=b3ce87d420312c20d4f6cc702a47fdb58d2765711b0b237ce16fdeb3eb25a278&ipo=images)
+
+## Introduction 
+
+This project focuses on a case study involving Bayesian data analysis. The aim is to thoroughly understand and apply Bayesian principles to a real-world dataset, providing valuable insights through a step-by-step analysis.
+
+## Objective
+
+The goal of this project is to model the distribution of daily steps given the observed examples along two years.
+
+$$\mathbb{P}(\text{steps}|\text{data})$$
+
+## Data
+
+This data was collected by exporting the [apple health](https://www.apple.com/ios/health/) from my personal device. It contains the daily steps recorded in a period of time of two years. I will provide the script I used to extract and preprocess the data along with this project.
+
+Let's take a look at the data.
+
+```{r import, warning=FALSE}
+rm(list=ls())
+data = read.csv('./data/cleaned_data.csv')
+attach(data)
+head(data)
+```
+
+This data set was originally thought to make a bayesian linear regression, but finally modeling the steps seems far more interesting
+
+Let's se what we are dealing with
+
+```{r, echo=FALSE}
+hist(Steps, breaks=20)
+```
+
+
+The data seems it could be modeled using a gamma distribution or log-normal. But the scale is very high, which is not ideal. Maybe we could deal with that using a lognormal, but instead we will apply a logarithmic transformation.
+
+```{r, echo=FALSE}
+hist(log(Steps), breaks=20)
+```
+
+As we can see this distribution has a slight negative skew. 
+
+## Bayesian Weibull model
+
+We will assume that steps, $X$, follows a weibull distribution
+$$X|k, \lambda \sim \text{Weibull}(k, \lambda)$$
+
+where the PDF is
+$$f(x|k, \lambda) = \frac{k}{\lambda}\bigg(\frac{x}{\lambda}\bigg)^{k-1} e^{(x/\lambda)^k}$$
+
+
+We begin by setting up the data and transforming it using the natural logarithm
+
+```{r}
+n=length(Steps)
+x=log(Steps)
+```
+
+This function calculates the log-likelihood of the Weibull distribution given the parameters :
+
+$$f(\text{data}|k,\lambda) = \prod^n_{i=1} \frac{k}{\lambda}\bigg(\frac{x_i}{\lambda}\bigg)^{k-1} e^{(x_i/\lambda)^k} \Rightarrow \log L(\text{data}|k,\lambda) = n\log k - n\log \lambda + (k-1)\sum^n_{i=1}\log x_i - \sum^n_{i=1}\bigg( \frac{x_i}{\lambda}\bigg)^k$$
+
+```{r}
+log_likelihood <- function(x, k, lam) {
+  return (sum(log(dweibull(x,shape=k,scale=lam))))
+}
+```
+
+Although we could take as a conjugate prior the inverse gamma function for $\lambda$ with known $k$, instead we will assume that:
+$$k \sim \text{Log-Normal}(\mu_k, \sigma^2_k)$$
+$$\lambda \sim \text{Log-Normal}(\mu_\lambda, \sigma^2_\lambda)$$
+
+Since these priors offer more robustness, gives us only positive results, offers us the log-space flexibility since, for example, the $\lambda$ parameter has a multiplicative effect, and it offers us skewness handling.
+
+This way, we can get the joint distribution:
+
+$$f(k,\lambda)=f(k)f(\lambda) \Rightarrow \log f(k,\lambda) = \log f(k)+\log f(\lambda)$$
+
+
+```{r}
+log_prior <- function(k, lam) {
+  mu_k <- 0.5
+  sigma_k <- 1
+  mu_lambda <- 0.5
+  sigma_lambda <- 1
+  log_prior_k <- -0.5 * ((log(k) - mu_k)^2 / sigma_k^2) - log(k * sigma_k * sqrt(2 * pi))
+  log_prior_lambda <- -0.5 * ((log(lam) - mu_lambda)^2 / sigma_lambda^2) - log(lam * sigma_lambda * sqrt(2 * pi))
+  return(log_prior_k + log_prior_lambda)
+}
+```
+
+
+Now, we initialize the parameters for our Markov Chain. First we set the number of iterations:
+
+```{r}
+burnin = 2000
+iters = 40000
+toiter=burnin+iters
+```
+
+Now, we intialize the parameters, along with the accpted values
+
+```{r}
+k=rep(0,toiter)
+lam=rep(0,toiter)
+
+k[1] <- 7
+lam[1] <- 70
+
+pac.k = 0
+pac.lam = 0
+```
+
+Finally, we simulate the Markov Chain
+
+```{r}
+for (i in 2:toiter) {
+  # Update k
+  kc <- rlnorm(1, meanlog = log(k[i-1]), sdlog = 0.1)  
+  log_alpha_k <- log_likelihood(x, kc, lam[i-1]) + log_prior(kc, lam[i-1]) -
+                  log_likelihood(x, k[i-1], lam[i-1]) - log_prior(k[i-1], lam[i-1])
+  
+  if (log(runif(1)) < log_alpha_k) {
+    k[i] <- kc; if (i>burnin){pac.k=pac.k+1}
+  }
+  else{
+    k[i] <- k[i-1]
+  }
+    
+  # Update lambda
+  lamc <- rlnorm(1, meanlog = log(lam[i-1]), sdlog = 0.02) 
+  log_alpha_lam <- log_likelihood(x, k[i], lamc) + log_prior(k[i], lamc) -
+                    log_likelihood(x, k[i], lam[i-1]) - log_prior(k[i], lam[i-1])
+  
+  if (log(runif(1)) < log_alpha_lam) {
+    lam[i] <- lamc; if (i>burnin){pac.lam=pac.lam+1}
+  }
+  else{
+    lam[i] <- lam[i-1]
+  }
+}
+
+```
+
+Let's check the accepted values
+
+```{r}
+pac.k = pac.k/iters
+pac.lam = pac.lam/iters
+c(pac.k, pac.lam)
+```
+
+Seems nice, now we will check the convergence of the algorithm
+
+```{r}
+thin <- 1
+k.post=k[seq(burnin+1,iters,by=thin)]
+lam.post=lam[seq(burnin+1,iters,by=thin)]
+
+plot.ts(k.post)
+plot.ts(lam.post)
+```
+
+The trace plot seems well enough, the chain is exploring correctly the values and has converged. Now let's check the autocorrelation
+
+```{r}
+acf(k.post)
+acf(lam.post)
+```
+
+It seems that there is some correlation, we should apply some thinning
+```{r}
+thin <- 5
+k.post=k[seq(burnin+1,iters,by=thin)]
+lam.post=lam[seq(burnin+1,iters,by=thin)]
+
+
+acf(k.post)
+acf(lam.post)
+```
+
+Much better, now there almost no correlation.
+
+Once we have ensured that the model has converged correctly, we can take a look at the parameters
+
+```{r}
+hist(k.post)
+mean(k.post)
+```
+
+
+```{r}
+hist(lam.post)
+mean(lam.post)
+```
+
+And also obtain the confidence intervals
+
+```{r}
+quantile(k.post,c(0.025,0.975))
+quantile(lam.post,c(0.025,0.975))
+```
+
+## Predictive probabilities
+
+Suppose we want to know if I am being healthy enough, it is estimated that around 7000 steps is considered healthy. We want to now $X_{n+1}$ is larger that $\log(7000)$ (remember the transformation), so:
+$$\mathbb{P}(X_{n+1} > \log(7000)| \text{data})$$
+The predictive distribution can be obtained by:
+
+$$f(x_{n+1} | \text{data}) = \int f(x|k,\lambda)f(k,\lambda|\text{data})dkd\lambda$$
+
+Since this density has no closed-form, we will obtain our posterior MCMC sample to obtain a sample of the predictive distribution:
+
+```{r}
+M=100000
+disc.pred=rweibull(M,shape=k.post, scale=lam.post)
+hist(disc.pred)
+```
+
+Now, we can compared with our data
+
+```{r}
+hist(x,freq=F, breaks=15)
+lines(density(disc.pred))
+```
+
+And this is our prediction of the probability of making more than 7000 steps
+```{r}
+mean(disc.pred>log(7000))
+```
+
+This probability is just 36.153%! Maybe I should improve my habits
+
+## Conclusion
+
+During this project, I embarked on a comprehensive exploration of Bayesian modeling techniques applied to a real-world dataset of daily step counts, aiming to predict future levels. 
+
+Using two years of personal data extracted from Apple Health, I examined the step counts' distribution and opted for a Weibull distribution after evaluating various transformation techniques.
+
+Throughout our analysis, I employed a Bayesian Weibull model, assuming log-normal priors for the shape and scale parameters of the distribution, which provided robustness and accommodated the data's skewness. Implementing a Markov Chain Monte Carlo (MCMC) using the Metropolis–Hastings algorithm, I iteratively refined our model parameters, ensuring convergence and adequacy through diagnostic checks, including trace plots and autocorrelation analyses.
+
+The results highlighted an average daily step count, with corresponding confidence intervals for the shape and scale parameters. The predictive analysis, aimed at evaluating the likelihood of surpassing the health benchmark of 7,000 steps.
+
+This case study not only showed the practical application of Bayesian statistics to real-world data but also demonstrated the findings that such an analytical approach can yield. 
+
+Future work could extend this model to include external variables like weather or day of the week distinctions, potentially providing a more understanding of step count variability.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
