@@ -1,6 +1,7 @@
 # Bayesian Data Analysis Coursework
 
 **Final grade: 9.5**
+
 **Practical case grade: 10**
 
 This course consisted in working with statistics from a bayesian point of view. We have seen:
